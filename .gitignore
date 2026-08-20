@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/release/
+/backup/
+*.log
+observed.json
+about_pos.json
+config.json

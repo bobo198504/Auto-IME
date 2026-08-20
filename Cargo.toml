@@ -1,0 +1,19 @@
+[package]
+name = "auto-ime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "links", "x11", "wayland", "web_screen_reader"] }
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tray-icon = "0.24.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_TextServices",
+] }
