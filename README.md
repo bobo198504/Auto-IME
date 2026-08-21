@@ -38,8 +38,8 @@ cargo build --release
 
 ## 作者
 
-阿波（Abo）
+abo
 
 ## 版本
 
-1.1
+1.2

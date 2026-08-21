@@ -862,7 +862,7 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
                 let state = get_thread_ime(thread_id);
                 let actual = read_chinese
                     .or(state.current)
-                    .unwrap_or(cfg.default_ime_chinese);
+                    .unwrap_or(false);
 
                 if !state.overridden {
                     set_baseline_ime(thread_id, actual);
@@ -887,7 +887,7 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
                 if state.overridden {
                     let actual = read_chinese
                         .or(state.current)
-                        .unwrap_or(cfg.default_ime_chinese);
+                        .unwrap_or(false);
                     debug_log(&format!(
                         "RESTORE thread={thread_id} actual={actual} baseline={:?} read={read_chinese:?} proc={}",
                         state.baseline, active.process_name

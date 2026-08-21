@@ -319,8 +319,6 @@ pub struct AppConfig {
     #[serde(default = "default_ime_toggle_hotkey")]
     pub ime_toggle_hotkey: String,
     #[serde(default)]
-    pub default_ime_chinese: bool,
-    #[serde(default)]
     pub window_pos: Option<(f32, f32)>,
     #[serde(default = "default_switch_method")]
     pub switch_method: SwitchMethod,
@@ -339,7 +337,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             ime_toggle_hotkey: default_ime_toggle_hotkey(),
-            default_ime_chinese: false,
             window_pos: None,
             switch_method: default_switch_method(),
             rules: Vec::new(),

@@ -38,8 +38,8 @@ cargo build --release
 
 ## Author
 
-Abo
+abo
 
 ## Version
 
-1.1
+1.2

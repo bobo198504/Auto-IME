@@ -256,14 +256,6 @@ impl eframe::App for AutoImeApp {
         egui::Panel::top("top_panel").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut cfg.default_ime_chinese, "系统输入法默认中文")
-                    .changed()
-                {
-                    changed = true;
-                }
-
-                ui.separator();
                 ui.label(&self.status);
             });
 
@@ -825,9 +817,9 @@ impl eframe::App for AboutApp {
             ui.add_space(10.0);
             ui.label("Auto IME - 输入法自动切换");
             ui.separator();
-            ui.label("版本号：1.0");
+            ui.label("版本号：1.2");
             ui.label(format!("日期：{}", win32::today_string()));
-            ui.label("署名：阿波");
+            ui.label("署名：abo");
             ui.add_space(10.0);
             ui.separator();
             ui.label("实时鼠标点击参数：");
