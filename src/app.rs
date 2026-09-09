@@ -817,7 +817,7 @@ impl eframe::App for AboutApp {
             ui.add_space(10.0);
             ui.label("Auto IME - 输入法自动切换");
             ui.separator();
-            ui.label("版本号：1.2");
+            ui.label("版本号：1.2.1");
             ui.label(format!("日期：{}", win32::today_string()));
             ui.label("署名：abo");
             ui.add_space(10.0);

@@ -2,7 +2,7 @@ use crate::model::{config_path, Action, AppConfig, SwitchMethod, WindowInfo};
 use std::ffi::c_void;
 use std::mem;
 use std::ptr;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ type LRESULT = isize;
 type LPARAM = isize;
 type WPARAM = usize;
 type WNDPROC = unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT;
+type WINEVENTPROC = unsafe extern "system" fn(HANDLE, DWORD, HWND, LONG, LONG, DWORD, DWORD);
 
 const GA_ROOT: UINT = 2;
 const CWP_SKIPINVISIBLE: UINT = 0x0001;
@@ -43,6 +44,12 @@ const ERROR_ALREADY_EXISTS: DWORD = 183;
 const WAIT_OBJECT_0: DWORD = 0x00000000;
 
 const KEYEVENTF_KEYUP: DWORD = 0x0002;
+
+// WinEvent 焦点监听（键盘切换焦点时事件驱动触发规则评估）。
+const EVENT_SYSTEM_FOREGROUND: UINT = 0x0003;
+const EVENT_OBJECT_FOCUS: UINT = 0x8005;
+const WINEVENT_OUTOFCONTEXT: DWORD = 0x0000;
+const WINEVENT_SKIPOWNPROCESS: DWORD = 0x0002;
 
 const VK_SHIFT: u8 = 0x10;
 const VK_CONTROL: u8 = 0x11;
@@ -180,6 +187,15 @@ extern "system" {
     fn keybd_event(bVk: u8, bScan: u8, dwFlags: DWORD, dwExtraInfo: usize);
     fn GetAsyncKeyState(vKey: i32) -> i16;
     fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
+    fn SetWinEventHook(
+        eventMin: UINT,
+        eventMax: UINT,
+        hmodWinEventProc: HMODULE,
+        pfnWinEventProc: Option<WINEVENTPROC>,
+        idProcess: DWORD,
+        idThread: DWORD,
+        dwFlags: DWORD,
+    ) -> HANDLE;
 }
 
 #[link(name = "imm32")]
@@ -292,6 +308,27 @@ fn uia_from_point(pt: POINT) -> Option<UiaControl> {
         y: pt.y,
     };
     let element = unsafe { automation.ElementFromPoint(point).ok()? };
+    let mut control = uia_control_from_element(&element)?;
+    let info = uia_ancestor_info(&automation, &element);
+    control.container_text = if info.container_text.is_empty() {
+        info.ancestor_texts.first().cloned().unwrap_or_default()
+    } else {
+        info.container_text
+    };
+    control.ancestor_texts = info.ancestor_texts;
+    control.ancestor_classes = info.ancestor_classes;
+    Some(control)
+}
+
+fn uia_from_hwnd(hwnd: HWND) -> Option<UiaControl> {
+    let automation = uia_automation()?;
+    let element = unsafe {
+        automation
+            .ElementFromHandle(windows::Win32::Foundation::HWND(
+                hwnd as *mut core::ffi::c_void,
+            ))
+            .ok()?
+    };
     let mut control = uia_control_from_element(&element)?;
     let info = uia_ancestor_info(&automation, &element);
     control.container_text = if info.container_text.is_empty() {
@@ -427,6 +464,12 @@ pub fn capture_from_cursor() -> Option<WindowInfo> {
         return None;
     }
     capture_from_point(pt)
+}
+
+/// 抓取当前拥有键盘焦点的控件信息（键盘激活场景：Tab / 方向键等）。
+pub fn capture_from_focus() -> Option<WindowInfo> {
+    let hwnd = focused_hwnd()?;
+    capture_from_hwnd(hwnd)
 }
 
 pub fn is_already_running() -> bool {
@@ -638,6 +681,62 @@ pub fn force_exit() -> ! {
     std::process::exit(0)
 }
 
+// ===== 键盘焦点变化监听 =====
+// 用 WinEvent hook 感知鼠标之外的焦点切换（Tab / 方向键 / Alt+Tab / 点击菜单等），
+// 事件回调只向 monitor 线程发送轻量通知，控件抓取与规则评估都在 monitor 线程执行。
+// hook 必须在有消息循环的线程安装（daemon 主循环），回调由 DispatchMessageW 分发。
+
+static FOCUS_EVENT_TX: OnceLock<Sender<()>> = OnceLock::new();
+static FOCUS_EVENT_RX: OnceLock<Mutex<Option<Receiver<()>>>> = OnceLock::new();
+
+/// 取出键盘焦点事件接收端（run_monitor 线程调用，仅能取出一次）。
+pub fn take_focus_change_receiver() -> Option<Receiver<()>> {
+    let cell = FOCUS_EVENT_RX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = FOCUS_EVENT_TX.set(tx);
+        Mutex::new(Some(rx))
+    });
+    cell.lock().ok().and_then(|mut guard| guard.take())
+}
+
+pub fn install_focus_hook() {
+    unsafe {
+        let callback: Option<WINEVENTPROC> = Some(win_event_proc);
+        SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            0,
+            callback,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        SetWinEventHook(
+            EVENT_OBJECT_FOCUS,
+            EVENT_OBJECT_FOCUS,
+            0,
+            callback,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+    }
+}
+
+unsafe extern "system" fn win_event_proc(
+    _hook: HANDLE,
+    _event: DWORD,
+    _hwnd: HWND,
+    _id_object: LONG,
+    _id_child: LONG,
+    _id_event_thread: DWORD,
+    _event_time: DWORD,
+) {
+    if let Some(tx) = FOCUS_EVENT_TX.get() {
+        let _ = tx.send(());
+    }
+}
+
 pub fn today_string() -> String {
     let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe {
@@ -798,6 +897,9 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
         .unwrap_or_else(|| "auto-ime.exe".to_string());
 
+    // 键盘焦点变化（WinEvent hook）的事件通道：Tab / 方向键 / Alt+Tab 等。
+    let focus_rx = take_focus_change_receiver();
+
     let mut prev_lbtn_down = false;
     let mut last_prune = Instant::now();
 
@@ -809,11 +911,23 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
             prune_dead_threads();
         }
 
+        // 键盘焦点事件到达后，稍等目标窗口完成焦点转移再抓取。
+        let focus_pending = match focus_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            Some(()) => {
+                std::thread::sleep(Duration::from_millis(40));
+                true
+            }
+            None => false,
+        };
+
         let lbtn_down = (unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000) != 0;
         let clicked = lbtn_down && !prev_lbtn_down;
         prev_lbtn_down = lbtn_down;
 
-        if !clicked || capture_armed() {
+        if !clicked && !focus_pending {
+            continue;
+        }
+        if capture_armed() {
             continue;
         }
 
@@ -822,15 +936,35 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
             Err(_) => continue,
         };
 
-        // 点击后稍等前台窗口切换，再抓取点击位置下的控件用于规则匹配。
-        std::thread::sleep(Duration::from_millis(40));
-        let Some(active) = capture_from_cursor() else {
-            continue;
+        // 键盘切换时抓取真正的焦点控件；鼠标点击仍抓取点击位置下的控件。
+        if clicked {
+            // 点击后稍等前台窗口切换，再抓取点击位置下的控件用于规则匹配。
+            std::thread::sleep(Duration::from_millis(40));
+        }
+
+        // 两种触发共用的评估流程。
+        let active = if clicked {
+            match capture_from_cursor() {
+                Some(active) => active,
+                None => continue,
+            }
+        } else {
+            match capture_from_focus() {
+                Some(active) => active,
+                None => continue,
+            }
         };
+
         if active.process_name.to_lowercase() == own_name {
             continue;
         }
         set_observed_info(active.clone());
+
+        // 鼠标点击时要求点击的窗口确实成为前台窗口（过滤点击任务栏等未激活场景）；
+        // 键盘焦点路径本身就以焦点控件为准，无需此检查。
+        if clicked && unsafe { GetForegroundWindow() } != active.window_hwnd as HWND {
+            continue;
+        }
 
         let mut matched: Option<(String, Action)> = None;
 
@@ -841,69 +975,70 @@ pub fn run_monitor(config: Arc<Mutex<AppConfig>>) {
             }
         }
 
-        if unsafe { GetForegroundWindow() } != active.window_hwnd as HWND {
-            continue;
-        }
-
         // IME 状态以真正拥有键盘焦点的控件为准，避免下拉菜单/遮罩等临时窗口干扰。
         let focus_hwnd = focused_hwnd().unwrap_or(active.control_hwnd as HWND);
+        evaluate_and_switch(&cfg, &active, matched.as_ref(), focus_hwnd);
+    }
+}
 
-        let mut pid: DWORD = 0;
-        let thread_id = unsafe { GetWindowThreadProcessId(focus_hwnd, &mut pid) };
-        if thread_id == 0 {
-            continue;
-        }
+/// 根据命中结果执行切换或恢复（鼠标点击与键盘焦点共用）。
+fn evaluate_and_switch(
+    cfg: &AppConfig,
+    active: &WindowInfo,
+    matched: Option<&(String, Action)>,
+    focus_hwnd: HWND,
+) {
+    let mut pid: DWORD = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(focus_hwnd, &mut pid) };
+    if thread_id == 0 {
+        return;
+    }
 
-        let read_chinese = read_ime_chinese(focus_hwnd);
+    let read_chinese = read_ime_chinese(focus_hwnd);
 
-        match matched {
-            Some((_id, action)) => {
-                let desired_chinese = matches!(action, Action::Chinese);
-                let state = get_thread_ime(thread_id);
-                let actual = read_chinese
-                    .or(state.current)
-                    .unwrap_or(false);
+    match matched {
+        Some((_id, action)) => {
+            let desired_chinese = matches!(action, Action::Chinese);
+            let state = get_thread_ime(thread_id);
+            let actual = read_chinese.or(state.current).unwrap_or(false);
 
-                if !state.overridden {
-                    set_baseline_ime(thread_id, actual);
-                }
-
-                let need_toggle = actual != desired_chinese;
-                debug_log(&format!(
-                    "SWITCH rule={_id} desired={desired_chinese} thread={thread_id} actual={actual} read={read_chinese:?} baseline={:?} need={need_toggle} proc={}",
-                    state.baseline,
-                    active.process_name
-                ));
-                if need_toggle {
-                    apply_switch(&cfg, focus_hwnd, desired_chinese);
-                    set_current_ime(thread_id, desired_chinese);
-                } else if read_chinese.is_some() {
-                    set_current_ime(thread_id, actual);
-                }
-                set_overridden(thread_id, true);
+            if !state.overridden {
+                set_baseline_ime(thread_id, actual);
             }
-            None => {
-                let state = get_thread_ime(thread_id);
-                if state.overridden {
-                    let actual = read_chinese
-                        .or(state.current)
-                        .unwrap_or(false);
-                    debug_log(&format!(
-                        "RESTORE thread={thread_id} actual={actual} baseline={:?} read={read_chinese:?} proc={}",
-                        state.baseline, active.process_name
-                    ));
-                    if let Some(baseline) = state.baseline {
-                        if actual != baseline {
-                            apply_switch(&cfg, focus_hwnd, baseline);
-                            set_current_ime(thread_id, baseline);
-                        }
+
+            let need_toggle = actual != desired_chinese;
+            debug_log(&format!(
+                "SWITCH rule={_id} desired={desired_chinese} thread={thread_id} actual={actual} read={read_chinese:?} baseline={:?} need={need_toggle} proc={}",
+                state.baseline,
+                active.process_name
+            ));
+            if need_toggle {
+                apply_switch(cfg, focus_hwnd, desired_chinese);
+                set_current_ime(thread_id, desired_chinese);
+            } else if read_chinese.is_some() {
+                set_current_ime(thread_id, actual);
+            }
+            set_overridden(thread_id, true);
+        }
+        None => {
+            let state = get_thread_ime(thread_id);
+            if state.overridden {
+                let actual = read_chinese.or(state.current).unwrap_or(false);
+                debug_log(&format!(
+                    "RESTORE thread={thread_id} actual={actual} baseline={:?} read={read_chinese:?} proc={}",
+                    state.baseline, active.process_name
+                ));
+                if let Some(baseline) = state.baseline {
+                    if actual != baseline {
+                        apply_switch(cfg, focus_hwnd, baseline);
+                        set_current_ime(thread_id, baseline);
                     }
-                    set_overridden(thread_id, false);
-                } else if let Some(actual) = read_chinese {
-                    // 未命中规则且未覆盖：持续把真实状态同步为基线，捕获用户手动切换。
-                    set_baseline_ime(thread_id, actual);
-                    set_current_ime(thread_id, actual);
                 }
+                set_overridden(thread_id, false);
+            } else if let Some(actual) = read_chinese {
+                // 未命中规则且未覆盖：持续把真实状态同步为基线，捕获用户手动切换。
+                set_baseline_ime(thread_id, actual);
+                set_current_ime(thread_id, actual);
             }
         }
     }
@@ -1112,6 +1247,25 @@ fn capture_from_point(pt: POINT) -> Option<WindowInfo> {
     }
     if capture_armed() {
         debug_log(&format!("CAPTURE {}", info.summary()));
+    }
+    Some(info)
+}
+
+/// 从指定控件句柄构建完整信息：以该控件为匹配对象（键盘焦点场景）。
+fn capture_from_hwnd(hwnd: HWND) -> Option<WindowInfo> {
+    if hwnd == 0 {
+        return None;
+    }
+    let mut root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    if root == 0 {
+        root = hwnd;
+    }
+    let mut info = build_info(root, hwnd);
+    if let Some(uia) = uia_from_hwnd(hwnd) {
+        merge_uia_control(&mut info, &uia);
+    }
+    if capture_armed() {
+        debug_log(&format!("CAPTURE_FOCUS {}", info.summary()));
     }
     Some(info)
 }

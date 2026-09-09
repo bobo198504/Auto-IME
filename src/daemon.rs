@@ -57,6 +57,8 @@ pub fn run_daemon() {
     win32::create_quit_event();
     win32::create_focus_event();
     win32::create_about_focus_event();
+    // 键盘焦点变化监听（Tab/方向键/Alt+Tab 等），事件回调在本线程消息循环中分发。
+    win32::install_focus_hook();
 
     let exe = match std::env::current_exe() {
         Ok(path) => path,
