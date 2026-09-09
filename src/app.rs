@@ -17,6 +17,7 @@ pub struct AutoImeApp {
     editing: bool,
     draft: Option<AppConfig>,
     quitting: bool,
+    pos_checked: bool,
 }
 
 impl AutoImeApp {
@@ -50,6 +51,7 @@ impl AutoImeApp {
             editing: false,
             draft: None,
             quitting: false,
+            pos_checked: false,
         }
     }
 
@@ -216,6 +218,19 @@ impl eframe::App for AutoImeApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_close_request(ctx);
         self.process_events(ctx);
+
+        // 窗口激活时若位于显示器可视区域外（多显示器排列变化/越界保存），
+        // 跳回鼠标当前所在显示器的工作区正中间。只在首次获得位置时检测一次。
+        if !self.pos_checked {
+            let rect = ctx.input(|i| i.viewport().outer_rect);
+            if let Some(rect) = rect {
+                self.pos_checked = true;
+                if let Some(target) = win32::ensure_window_visible(rect) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
+                }
+            }
+        }
+
         if win32::should_quit() {
             let mut cfg = self.current_config();
             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
@@ -787,17 +802,30 @@ fn save_about_pos(ctx: &egui::Context) {
     }
 }
 
-pub struct AboutApp;
+pub struct AboutApp {
+    pos_checked: bool,
+}
 
 impl AboutApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_chinese_font(&cc.egui_ctx);
-        Self
+        Self { pos_checked: false }
     }
 }
 
 impl eframe::App for AboutApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 窗口越界时跳回鼠标所在显示器工作区正中间（只检测一次）。
+        if !self.pos_checked {
+            let rect = ctx.input(|i| i.viewport().outer_rect);
+            if let Some(rect) = rect {
+                self.pos_checked = true;
+                if let Some(target) = win32::ensure_window_visible(rect) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
+                }
+            }
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) {
             save_about_pos(ctx);
             std::process::exit(0);

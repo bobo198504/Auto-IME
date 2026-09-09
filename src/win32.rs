@@ -65,6 +65,9 @@ const IMC_SETOPENSTATUS: WPARAM = 0x0006;
 
 const HOTKEY_ID_ARM: isize = 0x41_45_4d_49;
 
+const MONITOR_DEFAULTTONULL: DWORD = 0x0000;
+const MONITOR_DEFAULTTONEAREST: DWORD = 0x0002;
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct POINT {
@@ -79,6 +82,15 @@ struct RECT {
     top: LONG,
     right: LONG,
     bottom: LONG,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MONITORINFO {
+    cbSize: DWORD,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: DWORD,
 }
 
 #[repr(C)]
@@ -150,6 +162,9 @@ struct SYSTEMTIME {
 #[link(name = "user32")]
 extern "system" {
     fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+    fn MonitorFromRect(lprc: *const RECT, dwFlags: DWORD) -> HANDLE;
+    fn MonitorFromPoint(pt: POINT, dwFlags: DWORD) -> HANDLE;
+    fn GetMonitorInfoW(hMonitor: HANDLE, lpmi: *mut MONITORINFO) -> BOOL;
     fn WindowFromPoint(pt: POINT) -> HWND;
     fn GetAncestor(hwnd: HWND, gaFlags: UINT) -> HWND;
     fn GetWindowTextW(hwnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
@@ -743,6 +758,66 @@ pub fn today_string() -> String {
         GetLocalTime(&mut st);
     }
     format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
+}
+
+/// 判断一个矩形是否完全落在某个显示器的可视区域外（多显示器排列/拔插后，
+/// 窗口可能被保存在已消失或屏幕边缘之外的位置）。
+fn rect_off_screen(rect: &RECT) -> bool {
+    unsafe {
+        let monitor = MonitorFromRect(rect, MONITOR_DEFAULTTONULL);
+        if monitor == 0 {
+            return true; // 没有显示器覆盖该矩形，视为在屏幕外。
+        }
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as DWORD;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return false;
+        }
+        // 要求窗口至少与所在显示器的工作区有可见交集；完全不可见才判定为越界。
+        let work = &info.rcWork;
+        let visible_w = (rect.right.min(work.right) - rect.left.max(work.left)).max(0);
+        let visible_h = (rect.bottom.min(work.bottom) - rect.top.max(work.top)).max(0);
+        visible_w <= 0 || visible_h <= 0
+    }
+}
+
+/// 窗口越界时的回退位置：鼠标当前所在显示器工作区的正中间。
+pub fn cursor_monitor_center(window_w: i32, window_h: i32) -> (i32, i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt) == 0 {
+            return (0, 0);
+        }
+        let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as DWORD;
+        if monitor == 0 || GetMonitorInfoW(monitor, &mut info) == 0 {
+            return (0, 0);
+        }
+        let work = &info.rcWork;
+        let x = work.left + ((work.right - work.left) - window_w) / 2;
+        let y = work.top + ((work.bottom - work.top) - window_h) / 2;
+        (x, y)
+    }
+}
+
+/// 窗口激活时检查是否在屏幕外，若越界则返回跳转到鼠标所在显示器中央的目标位置。
+pub fn ensure_window_visible(rect: eframe::egui::Rect) -> Option<eframe::egui::Pos2> {
+    let win_rect = RECT {
+        left: rect.min.x.round() as LONG,
+        top: rect.min.y.round() as LONG,
+        right: rect.max.x.round() as LONG,
+        bottom: rect.max.y.round() as LONG,
+    };
+    if !rect_off_screen(&win_rect) {
+        return None;
+    }
+    let (w, h) = (
+        (win_rect.right - win_rect.left).max(1),
+        (win_rect.bottom - win_rect.top).max(1),
+    );
+    let (x, y) = cursor_monitor_center(w, h);
+    Some(eframe::egui::Pos2::new(x as f32, y as f32))
 }
 
 fn debug_log(message: &str) {
