@@ -1,26 +1,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 定位本项目使用的 MinGW-w64 工具链，按优先级：
-/// 1. 环境变量 MINGW64_ROOT 显式指定（可移植到任意位置）；
+/// 定位 Rust windows-gnu 构建所需的 MinGW 工具链，按优先级：
+/// 1. 环境变量 MINGW64_ROOT 显式指定（可指向任意含 bin/windres.exe 的工具链，如 w64devkit）；
 /// 2. 共享工具链目录：与 _tools 同处一个父目录（D:\Projects\Code\_tools\mingw64）；
-/// 3. 项目内 .tools\mingw64（旧布局，clone 到未共享工具链的目录时仍可用）。
-///
-/// 该工具链提供 windres 与 rustup windows-gnu 工具链缺少的
-/// imm32/shlwapi 导入库（见下方 lib-extra 说明）。
+/// 3. 项目内 .tools\mingw64（旧布局，clone 到无共享工具链的目录时仍可用）。
+fn valid_root(root: &Path) -> bool {
+    root.join("bin").join("windres.exe").exists()
+}
+
 fn find_toolchain(manifest: &Path) -> Option<PathBuf> {
     if let Ok(root) = std::env::var("MINGW64_ROOT") {
         let candidate = PathBuf::from(root);
-        if candidate.join("bin").join("windres.exe").exists() {
+        if valid_root(&candidate) {
             return Some(candidate);
         }
     }
-    let shared = manifest.parent()?.join("_tools").join("mingw64");
-    if shared.join("bin").join("windres.exe").exists() {
-        return Some(shared);
+    if let Some(parent) = manifest.parent() {
+        let shared = parent.join("_tools").join("mingw64");
+        if valid_root(&shared) {
+            return Some(shared);
+        }
     }
     let local = manifest.join(".tools").join("mingw64");
-    if local.join("bin").join("windres.exe").exists() {
+    if valid_root(&local) {
         return Some(local);
     }
     None
@@ -61,13 +64,22 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/autoime.ico");
     println!("cargo:rerun-if-changed=assets/preprocess.cmd");
 
-    // rustup 的 windows-gnu 工具链自带的链接器缺少 imm32/shlwapi 导入库，
-    // 这两个库随共享工具链放在 lib-extra 中；不能把整个 lib 加入搜索路径，
-    // 否则会与 rustup 自带运行库冲突。
+    // rustup 的 windows-gnu 工具链自带的链接器缺少 imm32/shlwapi 导入库。
+    // 整个 lib 目录加入搜索路径会与 rustup 自带运行库冲突，因此只把这两个库
+    // 复制到构建输出目录后再加入搜索路径，不在工具链或项目中留下专属文件。
     if let Some(root) = toolchain {
-        let lib_extra = root.join("lib-extra");
-        if lib_extra.exists() {
-            println!("cargo:rustc-link-search=native={}", lib_extra.display());
+        let link_dir = out_dir.join("link-libs");
+        if std::fs::create_dir_all(&link_dir).is_ok() {
+            let mut copied = 0;
+            for name in ["libimm32.a", "libshlwapi.a"] {
+                let src = root.join("lib").join(name);
+                if src.exists() && std::fs::copy(&src, link_dir.join(name)).is_ok() {
+                    copied += 1;
+                }
+            }
+            if copied > 0 {
+                println!("cargo:rustc-link-search=native={}", link_dir.display());
+            }
         }
     }
 }
